@@ -2,6 +2,8 @@
 
 A **UniFi Network-style** client dashboard and network topology editor for OPNsense.
 
+![Tree View with node details](docs/Screenshot_Topology_Detail_v12.2.png)
+
 ## Features
 
 ### Clients Tab
@@ -89,3 +91,15 @@ sh /tmp/os-client-overview/uninstall.sh --purge   # removes everything
 - OPNsense 23.x+ with Kea DHCP
 - Python 3 (included with OPNsense)
 - No additional packages required
+
+## Screenshots
+
+![Clients view](docs/Screenshot_Clients_v12.2.png)
+
+![Node details](docs/Screenshot_Client_Detail_v12.2.png)
+
+![Embed into OPNsense](docs/Screenshot_Embed_v12.2.png)
+
+![Customizable Icon Upload](docs/Screenshot_Icon_Upload_v12.2.png)
+
+![Topology view](docs/Screenshot_Topology_v12.2.png)
