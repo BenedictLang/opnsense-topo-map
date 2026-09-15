@@ -4,9 +4,14 @@ Client Overview v12 - Device classification, fingerprint icons, WoL.
 """
 
 import json, csv, os, subprocess, re, time, glob, sys, ipaddress
+import xml.etree.ElementTree as ET
 
 KEA_LEASE4_FILE = '/var/db/kea/kea-leases4.csv'
 KEA_LEASE4_FILE_ALT = '/var/lib/kea/dhcp4.leases'
+DNSMASQ_LEASE_FILE = '/var/db/dnsmasq.leases'
+DNSMASQ_LEASE_FILE_ALT = '/var/lib/misc/dnsmasq.leases'
+OPNSENSE_CONFIG_FILE = '/conf/config.xml'
+OPNSENSE_CONFIG_FILE_ALT = '/usr/local/etc/config.xml'
 OUI_JSON = '/tmp/oui.txt.json'
 OUI_NMAP = '/usr/local/share/nmap/nmap-mac-prefixes'
 CUSTOM_FILE = '/usr/local/opnsense/scripts/clientoverview/custom_devices.json'
@@ -256,6 +261,7 @@ def load_oui():
 
 
 def load_vendor_cache():
+    """Load the cached MAC vendor lookups from disk if present."""
     if os.path.exists(VENDOR_CACHE):
         try:
             with open(VENDOR_CACHE, 'r') as f: return json.load(f)
@@ -263,6 +269,7 @@ def load_vendor_cache():
     return {}
 
 def save_vendor_cache(c):
+    """Persist updated MAC vendor cache data atomically to disk."""
     try:
         tmp = VENDOR_CACHE + '.tmp'
         with open(tmp, 'w') as f: json.dump(c, f)
@@ -270,6 +277,7 @@ def save_vendor_cache(c):
     except: pass
 
 def get_vendor(mac, oui_db, vcache):
+    """Resolve a vendor name from the OUI database or cached MAC lookups."""
     if not mac: return ''
     prefix = mac.upper().replace(':','').replace('-','')[:6]
     v = oui_db.get(prefix, '')
@@ -294,6 +302,7 @@ def get_vendor(mac, oui_db, vcache):
 # ═══════════════════════════════════════════════════════
 
 def classify(vendor, mac, hostname=''):
+    """Infer a device type and product name from vendor, MAC, and hostname."""
     mac_clean = (mac or '').upper().replace(':','').replace('-','')[:6]
     hn = (hostname or '').lower()
     vl = (vendor or '').lower()
@@ -320,6 +329,7 @@ def classify(vendor, mac, hostname=''):
 # ═══════════════════════════════════════════════════════
 
 def get_arp():
+    """Return the current ARP table as a map of IP addresses to MAC addresses."""
     e = {}
     try:
         out = subprocess.check_output(['/usr/sbin/arp', '-an'], text=True, timeout=10)
@@ -333,6 +343,7 @@ def get_arp():
     return e
 
 def read_kea():
+    """Read active DHCP leases from the Kea DHCP CSV export."""
     for path in [KEA_LEASE4_FILE, KEA_LEASE4_FILE_ALT]:
         if not os.path.exists(path): continue
         leases = []
@@ -348,7 +359,44 @@ def read_kea():
         return leases
     return []
 
+def read_dnsmasq():
+    """Read dnsmasq leases and expose the same fields as read_kea()."""
+    for path in [DNSMASQ_LEASE_FILE, DNSMASQ_LEASE_FILE_ALT]:
+        if not os.path.exists(path): continue
+        leases = []
+        try:
+            with open(path, 'r') as f:
+                for line in f:
+                    fields = line.strip().split()
+                    if len(fields) < 4: continue
+                    expiry, mac, ip, hostname = fields[:4]
+                    try:
+                        int(expiry)
+                        ipaddress.ip_address(ip)
+                    except (TypeError, ValueError):
+                        continue
+                    if not re.match(r'^([0-9a-f]{2}:){5}[0-9a-f]{2}$', mac, re.I):
+                        continue
+                    leases.append({
+                        'expire': expiry,
+                        'hwaddr': mac.lower(),
+                        'address': ip,
+                        'hostname': '' if hostname == '*' else hostname,
+                        'state': '0',
+                    })
+        except: pass
+        return leases
+    return []
+
+def read_dhcp_leases():
+    """Read leases from Kea first, then fall back to dnsmasq."""
+    kea_leases = read_kea()
+    if kea_leases:
+        return kea_leases
+    return read_dnsmasq()
+
 def get_reservations():
+    """Load static DHCP reservations keyed by MAC address."""
     res = {}
     cf = '/usr/local/etc/kea/kea-dhcp4.conf'
     if os.path.exists(cf):
@@ -362,19 +410,20 @@ def get_reservations():
     return res
 
 def get_subnets():
-    """Build a list of subnets with VLAN IDs from Kea config."""
+    """Build IPv4 subnets from Kea first, then OPNsense config.xml."""
     subnets = []
-    cf = '/usr/local/etc/kea/kea-dhcp4.conf'
-    if os.path.exists(cf):
+
+    # Prefer Kea when it provides usable subnet data.
+    kea_cf = '/usr/local/etc/kea/kea-dhcp4.conf'
+    if os.path.exists(kea_cf):
         try:
-            with open(cf, 'r') as f: cfg = json.load(f)
+            with open(kea_cf, 'r') as f: cfg = json.load(f)
             for sn in cfg.get('Dhcp4', {}).get('subnet4', []):
                 prefix = sn.get('subnet', '')
                 desc = sn.get('description', '')
                 if prefix:
                     try:
                         net = ipaddress.ip_network(prefix, strict=False)
-                        # Use 3rd octet as VLAN ID
                         parts = str(net.network_address).split('.')
                         vlan_id = parts[2] if len(parts) >= 4 else ''
                         subnets.append({
@@ -385,6 +434,56 @@ def get_subnets():
                         })
                     except: pass
         except: pass
+
+    if subnets:
+        return subnets
+
+    # Fall back to OPNsense config.xml for dnsmasq and other DHCP setups.
+    cf = next((path for path in [OPNSENSE_CONFIG_FILE, OPNSENSE_CONFIG_FILE_ALT]
+               if os.path.exists(path)), None)
+    if cf:
+        try:
+            root = ET.parse(cf).getroot()
+            vlan_by_interface = {}
+            vlan_names = {}
+            vlans = root.find('vlans')
+            if vlans is not None:
+                for vlan in vlans.findall('vlan'):
+                    tag = (vlan.findtext('tag') or '').strip()
+                    vlanif = (vlan.findtext('vlanif') or '').strip()
+                    desc = (vlan.findtext('descr') or '').strip()
+                    if tag and vlanif:
+                        vlan_by_interface[vlanif] = tag
+                    if tag and desc:
+                        vlan_names[tag] = desc.upper()
+
+            interfaces = root.find('interfaces')
+            if interfaces is not None:
+                for interface in list(interfaces):
+                    ipaddr = (interface.findtext('ipaddr') or '').strip()
+                    prefix = (interface.findtext('subnet') or '').strip()
+                    interface_name = (interface.findtext('if') or '').strip()
+                    desc = (interface.findtext('descr') or '').strip()
+                    if ipaddr and prefix and ipaddr not in ('dhcp', 'none'):
+                        try:
+                            if '/' not in prefix:
+                                prefix = ipaddr + '/' + prefix
+                            net = ipaddress.ip_network(prefix, strict=False)
+                            vlan_id = vlan_by_interface.get(interface_name, '')
+                            if vlan_id and desc:
+                                vlan_names.setdefault(vlan_id, desc.upper())
+                            subnets.append({
+                                'net': net,
+                                'vlan': vlan_id,
+                                'name': vlan_names.get(vlan_id, desc.upper() if desc else ''),
+                                'prefix': prefix,
+                            })
+                        except: pass
+            for subnet in subnets:
+                if subnet['vlan'] in vlan_names:
+                    subnet['name'] = vlan_names[subnet['vlan']]
+        except: pass
+
     return subnets
 
 def ip_to_vlan(ip, subnets):
@@ -417,7 +516,7 @@ def cmd_list():
     arp = get_arp()
     reservations = get_reservations()
     subnets = get_subnets()
-    leases = read_kea()
+    leases = read_dhcp_leases()
     clients = {}
     cache_dirty = False
 
