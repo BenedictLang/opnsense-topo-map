@@ -10,7 +10,7 @@
 # Run on macOS (Nostromo) then scp to OPNsense.
 # ============================================================
 
-set -euo pipefail
+set -eu
 
 OUTDIR="${1:-./unifi-icons}"
 DB_URL="https://raw.githubusercontent.com/CANTI-BOT/UniFi-Icon-Browser/main/chrome-extension/data/fingerprint-database.json"
@@ -53,14 +53,10 @@ if [ ! -f "${DB_FILE}" ] || [ ! -s "${DB_FILE}" ]; then
         echo "  WARNING: Download failed (HTTP ${HTTP_CODE})"
         echo "  Trying alternative: fetching from UniFi-Icon-Browser releases..."
 
-        # Try alternate URL patterns
-        ALT_URLS=(
-            "https://raw.githubusercontent.com/CANTI-BOT/UniFi-Icon-Browser/refs/heads/main/chrome-extension/data/fingerprint-database.json"
-            "https://cdn.jsdelivr.net/gh/CANTI-BOT/UniFi-Icon-Browser@main/chrome-extension/data/fingerprint-database.json"
-        )
-
         DOWNLOADED=0
-        for ALT_URL in "${ALT_URLS[@]}"; do
+        for ALT_URL in \
+            "https://raw.githubusercontent.com/CANTI-BOT/UniFi-Icon-Browser/refs/heads/main/chrome-extension/data/fingerprint-database.json" \
+            "https://cdn.jsdelivr.net/gh/CANTI-BOT/UniFi-Icon-Browser@main/chrome-extension/data/fingerprint-database.json"; do
             echo "  Trying: ${ALT_URL}"
             HTTP_CODE=$(curl -sS -L -w "%{http_code}" -o "${DB_FILE}" "${ALT_URL}" 2>/dev/null || echo "000")
             if [ "${HTTP_CODE}" = "200" ] && [ -s "${DB_FILE}" ]; then
@@ -88,7 +84,7 @@ echo ""
 echo "=== Parsing device database ==="
 LOOKUP="${OUTDIR}/id_lookup.txt"
 
-ENTRY_COUNT=$(python3 << 'PYEOF'
+ENTRY_COUNT=$(python3 - "${DB_FILE}" "${LOOKUP}" 2>/dev/null << 'PYEOF'
 import json, re, sys
 
 db_file = sys.argv[1] if len(sys.argv) > 1 else "unifi-icons/fingerprint-database.json"
@@ -130,7 +126,7 @@ with open(lookup_file, 'w') as out:
 
 print(count)
 PYEOF
-"${DB_FILE}" "${LOOKUP}" 2>/dev/null) || ENTRY_COUNT=0
+) || ENTRY_COUNT=0
 
 echo "  Found ${ENTRY_COUNT} named devices in database"
 
@@ -144,7 +140,7 @@ echo ""
 # Create a download worker script
 WORKER="${OUTDIR}/.worker.sh"
 cat > "${WORKER}" << 'WORKEREOF'
-#!/bin/bash
+#!/bin/sh
 ID="$1"
 OUTDIR="$2"
 ICON_BASE="$3"
@@ -190,25 +186,27 @@ ID=0
 
 while [ ${ID} -le ${MAX_ID} ]; do
     # Launch batch
-    PIDS=()
-    TMPRESULTS=()
+    PIDS=""
+    TMPRESULTS=""
     BATCH_END=$((ID + CONCURRENT - 1))
     [ ${BATCH_END} -gt ${MAX_ID} ] && BATCH_END=${MAX_ID}
 
-    for (( I=ID; I<=BATCH_END; I++ )); do
+    I=${ID}
+    while [ ${I} -le ${BATCH_END} ]; do
         RESULT_FILE="${OUTDIR}/.result_${I}"
-        bash "${WORKER}" "${I}" "${OUTDIR}" "${ICON_BASE}" "${SIZE}" "${LOOKUP}" > "${RESULT_FILE}" 2>/dev/null &
-        PIDS+=($!)
-        TMPRESULTS+=("${RESULT_FILE}")
+        sh "${WORKER}" "${I}" "${OUTDIR}" "${ICON_BASE}" "${SIZE}" "${LOOKUP}" > "${RESULT_FILE}" 2>/dev/null &
+        PIDS="${PIDS} $!"
+        TMPRESULTS="${TMPRESULTS} ${RESULT_FILE}"
+        I=$((I + 1))
     done
 
     # Wait for batch
-    for PID in "${PIDS[@]}"; do
+    for PID in ${PIDS}; do
         wait ${PID} 2>/dev/null || true
     done
 
     # Count results
-    for RF in "${TMPRESULTS[@]}"; do
+    for RF in ${TMPRESULTS}; do
         if [ -f "${RF}" ] && grep -q "OK" "${RF}" 2>/dev/null; then
             FOUND=$((FOUND + 1))
         fi
