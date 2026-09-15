@@ -94,12 +94,17 @@ sh /tmp/os-client-overview/uninstall.sh --purge   # removes everything
 
 ## Screenshots
 
+### Clients view
 ![Clients view](docs/Screenshot_Clients_v12.2.png)
 
+### Node details
 ![Node details](docs/Screenshot_Client_Detail_v12.2.png)
 
+### Embed into OPNsense
 ![Embed into OPNsense](docs/Screenshot_Embed_v12.2.png)
 
+### Customizable Icon Upload
 ![Customizable Icon Upload](docs/Screenshot_Icon_Upload_v12.2.png)
 
+### Topology view
 ![Topology view](docs/Screenshot_Topology_v12.2.png)
